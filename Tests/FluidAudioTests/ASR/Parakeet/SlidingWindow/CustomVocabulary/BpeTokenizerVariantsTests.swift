@@ -10,6 +10,37 @@ import XCTest
 /// otherwise. They are not part of CITests.
 final class BpeTokenizerVariantsTests: XCTestCase {
 
+    private struct GoldenFixture: Decodable {
+        struct Case: Decodable {
+            let text: String
+            let ids: [Int]
+        }
+
+        let cases: [Case]
+    }
+
+    private var goldenFixtureURL: URL {
+        URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .appendingPathComponent("../../../../Resources/parakeet-v3-tokenizer-golden.json")
+            .standardizedFileURL
+    }
+
+    private func loadGoldenTokenizer(
+        normalization: BpeNormalization = .parakeetV3CaseSensitive
+    ) throws -> (BpeTokenizer, GoldenFixture) {
+        let data = try Data(contentsOf: goldenFixtureURL)
+        let fixture = try JSONDecoder().decode(GoldenFixture.self, from: data)
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FluidAudio-BpeTokenizer-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try data.write(to: directory.appendingPathComponent("tokenizer.json"), options: .atomic)
+        addTeardownBlock {
+            try? FileManager.default.removeItem(at: directory)
+        }
+        return (try BpeTokenizer.load(from: directory, normalization: normalization), fixture)
+    }
+
     /// Path to the CTC tokenizer that ships with the parakeet-ctc-110m model.
     private var tokenizerDir: URL? {
         guard
@@ -93,5 +124,79 @@ final class BpeTokenizerVariantsTests: XCTestCase {
         // First variant is always the boundary form.
         XCTAssertEqual(variants[0], ctcTokenizer.encode("nvidia"))
         XCTAssertEqual(variants[1], ctcTokenizer.encodeWithoutBoundary("nvidia"))
+    }
+
+    func testDefaultNormalizationPreservesExistingLowercasedCTCBehavior() throws {
+        let (defaultTokenizer, _) = try loadGoldenTokenizer(normalization: .ctcLowercased)
+        XCTAssertEqual(defaultTokenizer.encode("МИКО"), [1033, 386])
+
+        let data = try Data(contentsOf: goldenFixtureURL)
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FluidAudio-BpeTokenizer-default-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try data.write(to: directory.appendingPathComponent("tokenizer.json"), options: .atomic)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let implicitDefault = try BpeTokenizer.load(from: directory)
+        XCTAssertEqual(implicitDefault.encode("МИКО"), [1033, 386])
+    }
+
+    func testParakeetV3CaseSensitiveEncodingMatchesOfficialGoldenIDs() throws {
+        let (tokenizer, fixture) = try loadGoldenTokenizer()
+
+        for testCase in fixture.cases {
+            XCTAssertEqual(
+                tokenizer.encode(testCase.text),
+                testCase.ids,
+                "Unexpected token IDs for \(testCase.text)"
+            )
+        }
+    }
+
+    func testParakeetV3NormalizesWhitespaceWithoutFoldingCase() throws {
+        let (tokenizer, _) = try loadGoldenTokenizer()
+        XCTAssertEqual(tokenizer.encode("  Мико\t  поддержка  "), [3153, 386, 1821, 4811, 7951, 421])
+        XCTAssertNotEqual(tokenizer.encode("МИКО"), tokenizer.encode("Мико"))
+        XCTAssertNotEqual(tokenizer.encode("Мико"), tokenizer.encode("мико"))
+    }
+
+    func testParakeetV3KeepsPunctuationAndUsesUnknownTokenID() throws {
+        let (tokenizer, _) = try loadGoldenTokenizer()
+        XCTAssertEqual(tokenizer.encode("IP-телефония"), [380, 7946, 7918, 389, 511, 8022, 7885, 1040])
+        XCTAssertEqual(tokenizer.encode("мир!"), [1033, 7896, 8020])
+        XCTAssertEqual(tokenizer.encode("🙂"), [7863, 0])
+    }
+
+    func testParakeetV3TokenIDsAreDeterministicAcrossLoads() throws {
+        let (first, fixture) = try loadGoldenTokenizer()
+        let (second, _) = try loadGoldenTokenizer()
+
+        XCTAssertEqual(
+            fixture.cases.map { first.encode($0.text) },
+            fixture.cases.map { second.encode($0.text) }
+        )
+    }
+
+    func testMalformedMergeEntryIsRejected() throws {
+        let data = try Data(contentsOf: goldenFixtureURL)
+        var json = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        var model = try XCTUnwrap(json["model"] as? [String: Any])
+        model["merges"] = [["missing-second-token"]]
+        json["model"] = model
+
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FluidAudio-BpeTokenizer-malformed-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let malformed = try JSONSerialization.data(withJSONObject: json)
+        try malformed.write(to: directory.appendingPathComponent("tokenizer.json"), options: .atomic)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        XCTAssertThrowsError(
+            try BpeTokenizer.load(from: directory, normalization: .parakeetV3CaseSensitive)
+        ) { error in
+            guard case BpeTokenizer.Error.invalidJSON = error else {
+                return XCTFail("Expected invalidJSON, got \(error)")
+            }
+        }
     }
 }

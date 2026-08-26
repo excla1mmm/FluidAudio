@@ -1,5 +1,14 @@
 import Foundation
 
+/// Text normalization profile applied before BPE encoding.
+public enum BpeNormalization: Sendable {
+    /// Existing Parakeet CTC behavior: compatibility normalization followed by lowercasing.
+    case ctcLowercased
+
+    /// Multilingual Parakeet v3 behavior: compatibility normalization while preserving case.
+    case parakeetV3CaseSensitive
+}
+
 /// BPE tokenizer for CTC vocabulary boosting.
 /// Only implements encoding - no decoding, chat templates, or other features.
 /// Supports the specific tokenizer.json format used by Parakeet models.
@@ -10,6 +19,7 @@ public final class BpeTokenizer: Sendable {
     private let vocab: [String: Int]
     private let merges: [(String, String)]
     private let addedTokens: [String: Int]
+    private let normalization: BpeNormalization
 
     public enum Error: Swift.Error, LocalizedError {
         case fileNotFound(URL)
@@ -32,7 +42,10 @@ public final class BpeTokenizer: Sendable {
     }
 
     /// Load tokenizer from a folder containing tokenizer.json
-    public static func load(from modelFolder: URL) throws -> BpeTokenizer {
+    public static func load(
+        from modelFolder: URL,
+        normalization: BpeNormalization = .ctcLowercased
+    ) throws -> BpeTokenizer {
         let tokenizerPath = modelFolder.appendingPathComponent("tokenizer.json")
 
         guard FileManager.default.fileExists(atPath: tokenizerPath.path) else {
@@ -63,16 +76,7 @@ public final class BpeTokenizer: Sendable {
             throw Error.missingField("model.vocab")
         }
 
-        // Parse merges: ["a b", "c d", ...]
-        guard let mergesArray = model["merges"] as? [String] else {
-            throw Error.missingField("model.merges")
-        }
-
-        let merges = mergesArray.compactMap { mergeStr -> (String, String)? in
-            let parts = mergeStr.split(separator: " ", maxSplits: 1)
-            guard parts.count == 2 else { return nil }
-            return (String(parts[0]), String(parts[1]))
-        }
+        let merges = try parseMerges(model["merges"])
 
         // Parse added_tokens (special tokens like <unk>, <pad>)
         var addedTokensDict: [String: Int] = [:]
@@ -87,14 +91,46 @@ public final class BpeTokenizer: Sendable {
         return BpeTokenizer(
             vocab: vocabDict,
             merges: merges,
-            addedTokens: addedTokensDict
+            addedTokens: addedTokensDict,
+            normalization: normalization
         )
     }
 
-    private init(vocab: [String: Int], merges: [(String, String)], addedTokens: [String: Int]) {
+    private static func parseMerges(_ value: Any?) throws -> [(String, String)] {
+        guard let value else {
+            throw Error.missingField("model.merges")
+        }
+
+        if let mergePairs = value as? [[String]] {
+            guard mergePairs.allSatisfy({ $0.count == 2 }) else {
+                throw Error.invalidJSON("Every model.merges entry must contain exactly two tokens")
+            }
+            return mergePairs.map { ($0[0], $0[1]) }
+        }
+
+        if let mergeStrings = value as? [String] {
+            return try mergeStrings.map { mergeString in
+                let parts = mergeString.split(separator: " ", maxSplits: 1)
+                guard parts.count == 2 else {
+                    throw Error.invalidJSON("Every model.merges entry must contain exactly two tokens")
+                }
+                return (String(parts[0]), String(parts[1]))
+            }
+        }
+
+        throw Error.invalidJSON("model.merges must be an array of token pairs")
+    }
+
+    private init(
+        vocab: [String: Int],
+        merges: [(String, String)],
+        addedTokens: [String: Int],
+        normalization: BpeNormalization
+    ) {
         self.vocab = vocab
         self.merges = merges
         self.addedTokens = addedTokens
+        self.normalization = normalization
     }
 
     /// Encode text to token IDs using BPE.
@@ -114,8 +150,20 @@ public final class BpeTokenizer: Sendable {
         addSpecialTokens: Bool = false,
         prependWordBoundary: Bool = true
     ) -> [Int] {
-        // Normalize: lowercase + NFKC normalization (matches NeMo CTC models)
-        let normalized = text.lowercased().precomposedStringWithCompatibilityMapping
+        let normalized: String
+        switch normalization {
+        case .ctcLowercased:
+            normalized = text.lowercased().precomposedStringWithCompatibilityMapping
+        case .parakeetV3CaseSensitive:
+            normalized = text.precomposedStringWithCompatibilityMapping
+                .components(separatedBy: .whitespacesAndNewlines)
+                .filter { !$0.isEmpty }
+                .joined(separator: " ")
+        }
+
+        if normalized.isEmpty, case .parakeetV3CaseSensitive = normalization {
+            return []
+        }
 
         // Pre-tokenize: replace spaces with ▁ (sentencepiece style)
         let leading = prependWordBoundary ? ASRConstants.sentencePieceWordBoundary : ""
