@@ -10,6 +10,7 @@ struct ChunkProcessor {
         let index: Int
         let tokens: [TokenWindow]
         let workerIndex: Int
+        let phraseBiasingMetrics: PhraseBiasingMetrics?
     }
     private struct IndexedToken {
         let index: Int
@@ -20,6 +21,28 @@ struct ChunkProcessor {
     struct ChunkStartDecision {
         let start: Int
         let useWarmupPrefix: Bool
+    }
+
+    static func makeWindowDecoderState(
+        decoderLayers: Int,
+        phraseBiasing: PhraseBiasingConfig?
+    ) -> TdtDecoderState {
+        var state = TdtDecoderState.make(decoderLayers: decoderLayers)
+        state.reset()
+        state.preparePhraseBiasing(phraseBiasing)
+        return state
+    }
+
+    static func aggregatePhraseBiasingMetrics(
+        _ metrics: [PhraseBiasingMetrics]
+    ) -> PhraseBiasingMetrics? {
+        guard !metrics.isEmpty else { return nil }
+        return metrics.reduce(PhraseBiasingMetrics()) { partial, next in
+            PhraseBiasingMetrics(
+                boostedTokenDecisions: partial.boostedTokenDecisions + next.boostedTokenDecisions,
+                completedPhrases: partial.completedPhrases + next.completedPhrases
+            )
+        }
     }
 
     // Stateless chunking aligned with CoreML reference:
@@ -456,7 +479,8 @@ struct ChunkProcessor {
         using manager: AsrManager,
         startTime: Date,
         progressHandler: ((Double) async -> Void)? = nil,
-        language: Language? = nil
+        language: Language? = nil,
+        phraseBiasing: PhraseBiasingConfig? = nil
     ) async throws -> ASRResult {
         let requestedConcurrency = max(1, await manager.parallelChunkConcurrency)
         let workers = await makeWorkerPool(using: manager, count: requestedConcurrency) ?? [manager]
@@ -467,6 +491,7 @@ struct ChunkProcessor {
         let melChunkContext = await manager.melChunkContext
         let modelVersion = await manager.modelVersion
         let dualDecodeArbitration = await manager.dualDecodeArbitration
+        let activePhraseBiasing = modelVersion == .v3 ? phraseBiasing : nil
 
         // Dual-decode opt-in (only effective for v3 + no-mel; other paths
         // are not changed by the flag).
@@ -479,7 +504,8 @@ struct ChunkProcessor {
                 modelVersion: modelVersion,
                 startTime: startTime,
                 progressHandler: progressHandler,
-                language: language
+                language: language,
+                phraseBiasing: activePhraseBiasing
             )
         }
 
@@ -496,6 +522,7 @@ struct ChunkProcessor {
         )
 
         var chunkOutputs: [[TokenWindow]?] = []
+        var phraseMetrics: [PhraseBiasingMetrics] = []
         var availableWorkers = Array(workers.indices)
         var inFlight = 0
         var chunkDecision = chunkStarts.first ?? ChunkStartDecision(start: 0, useWarmupPrefix: false)
@@ -512,6 +539,9 @@ struct ChunkProcessor {
             guard inFlight > 0 else { return }
             guard let finished = try await group.next() else { return }
             chunkOutputs[finished.index] = finished.tokens
+            if let metrics = finished.phraseBiasingMetrics {
+                phraseMetrics.append(metrics)
+            }
             availableWorkers.append(finished.workerIndex)
             inFlight -= 1
         }
@@ -578,10 +608,12 @@ struct ChunkProcessor {
                 chunkOutputs.append(nil)
 
                 group.addTask {
-                    var decoderState = TdtDecoderState.make(decoderLayers: decoderLayers)
-                    decoderState.reset()
+                    var decoderState = Self.makeWindowDecoderState(
+                        decoderLayers: decoderLayers,
+                        phraseBiasing: activePhraseBiasing
+                    )
 
-                    let (windowTokens, windowTimestamps, windowConfidences, windowDurations) =
+                    let (windowTokens, windowTimestamps, windowConfidences, windowDurations, metrics) =
                         try await Self
                         .transcribeChunk(
                             samples: chunkSamplesArray,
@@ -592,6 +624,7 @@ struct ChunkProcessor {
                             decoderState: &decoderState,
                             maxModelSamples: maxModelSamples,
                             language: language,
+                            phraseBiasing: activePhraseBiasing,
                             emitTokensAfterFrame: emitTokensAfterFrame,
                             initialTimeIndexOverride: emitTokensAfterFrame == nil ? nil : 0
                         )
@@ -613,7 +646,12 @@ struct ChunkProcessor {
                         (token: $0.0.0.0, timestamp: $0.0.0.1, confidence: $0.0.1, duration: $0.1)
                     }
 
-                    return TaskResult(index: index, tokens: windowData, workerIndex: workerIndex)
+                    return TaskResult(
+                        index: index,
+                        tokens: windowData,
+                        workerIndex: workerIndex,
+                        phraseBiasingMetrics: metrics
+                    )
                 }
                 inFlight += 1
                 chunkIndex += 1
@@ -655,7 +693,9 @@ struct ChunkProcessor {
                 confidences: [],
                 encoderSequenceLength: 0,
                 audioSampleCount: totalSamples,
-                processingTime: Date().timeIntervalSince(startTime)
+                processingTime: Date().timeIntervalSince(startTime),
+                phraseBiasingMetrics: Self.aggregatePhraseBiasingMetrics(phraseMetrics)
+                    ?? (activePhraseBiasing == nil ? nil : PhraseBiasingMetrics())
             )
         }
 
@@ -707,7 +747,8 @@ struct ChunkProcessor {
                 speechRmsThreshold: speechRmsThreshold,
                 spliceSafeTokenIds: spliceSafeTokenIds,
                 vocabulary: vocabulary,
-                language: language
+                language: language,
+                phraseBiasing: activePhraseBiasing
             )
         }
 
@@ -723,7 +764,9 @@ struct ChunkProcessor {
             tokenDurations: allDurations,
             encoderSequenceLength: 0,  // Not relevant for chunk processing
             audioSampleCount: totalSamples,
-            processingTime: Date().timeIntervalSince(startTime)
+            processingTime: Date().timeIntervalSince(startTime),
+            phraseBiasingMetrics: Self.aggregatePhraseBiasingMetrics(phraseMetrics)
+                ?? (activePhraseBiasing == nil ? nil : PhraseBiasingMetrics())
         )
     }
 
@@ -760,10 +803,19 @@ struct ChunkProcessor {
         decoderState: inout TdtDecoderState,
         maxModelSamples: Int,
         language: Language? = nil,
+        phraseBiasing: PhraseBiasingConfig? = nil,
         emitTokensAfterFrame: Int? = nil,
         initialTimeIndexOverride: Int? = nil
-    ) async throws -> (tokens: [Int], timestamps: [Int], confidences: [Float], durations: [Int]) {
-        guard !samples.isEmpty else { return ([], [], [], []) }
+    ) async throws -> (
+        tokens: [Int],
+        timestamps: [Int],
+        confidences: [Float],
+        durations: [Int],
+        phraseBiasingMetrics: PhraseBiasingMetrics?
+    ) {
+        guard !samples.isEmpty else {
+            return ([], [], [], [], phraseBiasing == nil ? nil : PhraseBiasingMetrics())
+        }
 
         let paddedChunk = manager.padAudioIfNeeded(samples, targetLength: maxModelSamples)
 
@@ -786,15 +838,22 @@ struct ChunkProcessor {
             isLastChunk: isLastChunk,
             globalFrameOffset: globalFrameOffset,
             language: language,
+            phraseBiasing: phraseBiasing,
             emitTokensAfterGlobalFrame: emitTokensAfterFrame,
             initialTimeIndexOverride: initialTimeIndexOverride
         )
 
         if hypothesis.isEmpty || encoderSequenceLength == 0 {
-            return ([], [], [], [])
+            return ([], [], [], [], decoderState.phraseBiasingMetrics)
         }
 
-        return (hypothesis.ySequence, hypothesis.timestamps, hypothesis.tokenConfidences, hypothesis.tokenDurations)
+        return (
+            hypothesis.ySequence,
+            hypothesis.timestamps,
+            hypothesis.tokenConfidences,
+            hypothesis.tokenDurations,
+            decoderState.phraseBiasingMetrics
+        )
     }
 
     /// Token IDs that may safely start a seam splice: word-initial (`▁`) or
@@ -1400,7 +1459,8 @@ struct ChunkProcessor {
         speechRmsThreshold: Float,
         spliceSafeTokenIds: Set<Int>?,
         vocabulary: [Int: String],
-        language: Language?
+        language: Language?,
+        phraseBiasing: PhraseBiasingConfig?
     ) async throws -> [TokenWindow] {
         let frameSamples = ASRConstants.samplesPerEncoderFrame
         let frameDuration = ASRConstants.secondsPerEncoderFrame
@@ -1455,10 +1515,12 @@ struct ChunkProcessor {
                     let windowEnd = min(windowStart + windowSamples, totalSamples)
                     guard windowEnd > windowStart else { continue }
 
-                    var decoderState = TdtDecoderState.make(decoderLayers: decoderLayers)
-                    decoderState.reset()
+                    var decoderState = Self.makeWindowDecoderState(
+                        decoderLayers: decoderLayers,
+                        phraseBiasing: phraseBiasing
+                    )
                     let windowAudio = try readSamples(offset: windowStart, count: windowEnd - windowStart)
-                    let (windowTokens, windowTimestamps, windowConfidences, windowDurations) =
+                    let (windowTokens, windowTimestamps, windowConfidences, windowDurations, _) =
                         try await Self.transcribeChunk(
                             samples: windowAudio,
                             contextSamples: 0,
@@ -1467,7 +1529,8 @@ struct ChunkProcessor {
                             using: manager,
                             decoderState: &decoderState,
                             maxModelSamples: maxModelSamples,
-                            language: language
+                            language: language,
+                            phraseBiasing: phraseBiasing
                         )
 
                     guard windowTokens.count == windowTimestamps.count,

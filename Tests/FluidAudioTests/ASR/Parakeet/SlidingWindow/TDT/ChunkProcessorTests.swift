@@ -5,6 +5,29 @@ import XCTest
 @testable import FluidAudio
 
 final class ChunkProcessorTests: XCTestCase {
+    func testEveryParallelWindowStartsAtPhraseRootWithSharedTree() throws {
+        let config = PhraseBiasingConfig(
+            tree: try PhraseBoostingTree(tokenSequences: [[1, 2]]), alpha: 1, maximumTokenBoost: 2)
+        var first = ChunkProcessor.makeWindowDecoderState(decoderLayers: 2, phraseBiasing: config)
+        let second = ChunkProcessor.makeWindowDecoderState(decoderLayers: 2, phraseBiasing: config)
+
+        XCTAssertEqual(first.phraseBiasingState, config.tree.rootState)
+        XCTAssertEqual(second.phraseBiasingState, config.tree.rootState)
+
+        first.phraseBiasingState = config.tree.transition(from: config.tree.rootState, token: 1).state
+        XCTAssertNotEqual(first.phraseBiasingState, second.phraseBiasingState)
+        XCTAssertEqual(second.phraseBiasingState, config.tree.rootState)
+    }
+
+    func testPhraseMetricsAggregateAcrossWindows() {
+        let metrics = ChunkProcessor.aggregatePhraseBiasingMetrics([
+            PhraseBiasingMetrics(boostedTokenDecisions: 2, completedPhrases: 1),
+            PhraseBiasingMetrics(boostedTokenDecisions: 3, completedPhrases: 4),
+        ])
+
+        XCTAssertEqual(metrics, PhraseBiasingMetrics(boostedTokenDecisions: 5, completedPhrases: 5))
+        XCTAssertNil(ChunkProcessor.aggregatePhraseBiasingMetrics([]))
+    }
 
     // MARK: - Test Setup
 

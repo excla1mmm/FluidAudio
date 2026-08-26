@@ -12,6 +12,7 @@ extension AsrManager {
         isLastChunk: Bool = false,
         globalFrameOffset: Int = 0,
         language: Language? = nil,
+        phraseBiasing: PhraseBiasingConfig? = nil,
         emitTokensAfterGlobalFrame: Int? = nil,
         initialTimeIndexOverride: Int? = nil
     ) async throws -> (hypothesis: TdtHypothesis, encoderSequenceLength: Int) {
@@ -73,6 +74,7 @@ extension AsrManager {
                 isLastChunk: isLastChunk,
                 globalFrameOffset: globalFrameOffset,
                 language: language,
+                phraseBiasing: phraseBiasing,
                 emitTokensAfterGlobalFrame: emitTokensAfterGlobalFrame,
                 initialTimeIndexOverride: initialTimeIndexOverride
             )

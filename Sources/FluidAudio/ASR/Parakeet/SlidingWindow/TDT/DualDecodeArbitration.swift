@@ -30,6 +30,11 @@ private struct DualDecodeArbitrationConfig {
     }
 }
 
+private struct DualDecodeWindow {
+    let tokens: [ChunkProcessor.TokenWindow]
+    let phraseBiasingMetrics: PhraseBiasingMetrics?
+}
+
 extension ChunkProcessor {
     /// Per-file probe arbitration over silence-aligned and fixed-stride chunk
     /// layouts. The file commits to one path globally, so the chunk merger never
@@ -50,7 +55,8 @@ extension ChunkProcessor {
         modelVersion: AsrModelVersion?,
         startTime: Date,
         progressHandler: ((Double) async -> Void)?,
-        language: Language?
+        language: Language?,
+        phraseBiasing: PhraseBiasingConfig?
     ) async throws -> ASRResult {
         let config = DualDecodeArbitrationConfig()
         let logger = AppLogger(category: "ChunkProcessor")
@@ -81,7 +87,7 @@ extension ChunkProcessor {
         let pathCCount = pathCStartsDecisions.count
         let chunkCount = pathAStartsDecisions.count
 
-        var chunkOutputs: [[TokenWindow]] = []
+        var chunkOutputs: [DualDecodeWindow] = []
         chunkOutputs.reserveCapacity(chunkCount)
 
         let worker = workers.first ?? manager
@@ -100,7 +106,8 @@ extension ChunkProcessor {
                 confidences: [],
                 encoderSequenceLength: 0,
                 audioSampleCount: totalSamples,
-                processingTime: Date().timeIntervalSince(startTime)
+                processingTime: Date().timeIntervalSince(startTime),
+                phraseBiasingMetrics: phraseBiasing == nil ? nil : PhraseBiasingMetrics()
             )
         }
 
@@ -115,15 +122,16 @@ extension ChunkProcessor {
             using: worker,
             decoderLayers: decoderLayers,
             maxModelSamples: maxModelSamples,
-            language: language
+            language: language,
+            phraseBiasing: phraseBiasing
         )
         chunkOutputs.append(chunk0Tokens)
         await reportProgress(through: 0)
 
         let probeEnd = min(config.probeChunkCount, chunkCount - 1)
-        var pathAProbeOutputs: [[TokenWindow]] = []
-        var pathBProbeOutputs: [[TokenWindow]] = []
-        var pathCProbeOutputs: [[TokenWindow]] = []
+        var pathAProbeOutputs: [DualDecodeWindow] = []
+        var pathBProbeOutputs: [DualDecodeWindow] = []
+        var pathCProbeOutputs: [DualDecodeWindow] = []
         var pathAConfSum: Float = 0
         var pathBConfSum: Float = 0
         var pathCConfSum: Float = 0
@@ -145,11 +153,12 @@ extension ChunkProcessor {
                     using: worker,
                     decoderLayers: decoderLayers,
                     maxModelSamples: maxModelSamples,
-                    language: language
+                    language: language,
+                    phraseBiasing: phraseBiasing
                 )
                 pathAProbeOutputs.append(pathATokens)
-                for token in pathATokens { pathAConfSum += token.confidence }
-                pathATokenCount += pathATokens.count
+                for token in pathATokens.tokens { pathAConfSum += token.confidence }
+                pathATokenCount += pathATokens.tokens.count
 
                 if chunkIndex < pathBCount {
                     let pathBDecision = pathBStartsDecisions[chunkIndex]
@@ -158,8 +167,8 @@ extension ChunkProcessor {
                         ? min(config.pathBWarmupSamples, pathBDecision.start) : 0
                     if pathBDecision.start == pathADecision.start && warmupSamplesForB == 0 {
                         pathBProbeOutputs.append(pathATokens)
-                        for token in pathATokens { pathBConfSum += token.confidence }
-                        pathBTokenCount += pathATokens.count
+                        for token in pathATokens.tokens { pathBConfSum += token.confidence }
+                        pathBTokenCount += pathATokens.tokens.count
                     } else {
                         let pathBTokens = try await decodeOneChunk(
                             chunkStart: pathBDecision.start,
@@ -170,24 +179,25 @@ extension ChunkProcessor {
                             using: worker,
                             decoderLayers: decoderLayers,
                             maxModelSamples: maxModelSamples,
-                            language: language
+                            language: language,
+                            phraseBiasing: phraseBiasing
                         )
                         pathBProbeOutputs.append(pathBTokens)
-                        for token in pathBTokens { pathBConfSum += token.confidence }
-                        pathBTokenCount += pathBTokens.count
+                        for token in pathBTokens.tokens { pathBConfSum += token.confidence }
+                        pathBTokenCount += pathBTokens.tokens.count
                     }
                 } else {
                     pathBProbeOutputs.append(pathATokens)
-                    for token in pathATokens { pathBConfSum += token.confidence }
-                    pathBTokenCount += pathATokens.count
+                    for token in pathATokens.tokens { pathBConfSum += token.confidence }
+                    pathBTokenCount += pathATokens.tokens.count
                 }
 
                 if chunkIndex < pathCCount {
                     let pathCDecision = pathCStartsDecisions[chunkIndex]
                     if pathCDecision.start == pathADecision.start {
                         pathCProbeOutputs.append(pathATokens)
-                        for token in pathATokens { pathCConfSum += token.confidence }
-                        pathCTokenCount += pathATokens.count
+                        for token in pathATokens.tokens { pathCConfSum += token.confidence }
+                        pathCTokenCount += pathATokens.tokens.count
                     } else {
                         let pathCTokens = try await decodeOneChunk(
                             chunkStart: pathCDecision.start,
@@ -198,16 +208,17 @@ extension ChunkProcessor {
                             using: worker,
                             decoderLayers: decoderLayers,
                             maxModelSamples: maxModelSamples,
-                            language: language
+                            language: language,
+                            phraseBiasing: phraseBiasing
                         )
                         pathCProbeOutputs.append(pathCTokens)
-                        for token in pathCTokens { pathCConfSum += token.confidence }
-                        pathCTokenCount += pathCTokens.count
+                        for token in pathCTokens.tokens { pathCConfSum += token.confidence }
+                        pathCTokenCount += pathCTokens.tokens.count
                     }
                 } else {
                     pathCProbeOutputs.append(pathATokens)
-                    for token in pathATokens { pathCConfSum += token.confidence }
-                    pathCTokenCount += pathATokens.count
+                    for token in pathATokens.tokens { pathCConfSum += token.confidence }
+                    pathCTokenCount += pathATokens.tokens.count
                 }
             }
         }
@@ -226,8 +237,8 @@ extension ChunkProcessor {
         let agreementToleranceFrames = Int(overlapSeconds / ASRConstants.secondsPerEncoderFrame) / 2
         var pathACMatchedTokens = 0
         for chunkIndex in 0..<pathAProbeOutputs.count {
-            let a = pathAProbeOutputs[chunkIndex]
-            let c = chunkIndex < pathCProbeOutputs.count ? pathCProbeOutputs[chunkIndex] : []
+            let a = pathAProbeOutputs[chunkIndex].tokens
+            let c = chunkIndex < pathCProbeOutputs.count ? pathCProbeOutputs[chunkIndex].tokens : []
             for aTok in a {
                 for cTok in c {
                     if aTok.token == cTok.token
@@ -261,7 +272,7 @@ extension ChunkProcessor {
             "[dual-decode probe] A=(n=\(pathATokenCount), conf=\(pathAMean)) B=(n=\(pathBTokenCount), conf=\(pathBMean)) C=(n=\(pathCTokenCount), conf=\(pathCMean)) B/A=\(tokenRatioB) C/A=\(tokenRatioC) C-agree=\(pathCAgreement) -> \(chosenPath)"
         )
 
-        let chosenProbeOutputs: [[TokenWindow]]
+        let chosenProbeOutputs: [DualDecodeWindow]
         if usePathC {
             chosenProbeOutputs = pathCProbeOutputs
         } else if usePathB {
@@ -301,21 +312,23 @@ extension ChunkProcessor {
                     using: worker,
                     decoderLayers: decoderLayers,
                     maxModelSamples: maxModelSamples,
-                    language: language
+                    language: language,
+                    phraseBiasing: phraseBiasing
                 )
                 chunkOutputs.append(tokens)
                 await reportProgress(through: chunkIndex)
             }
         }
 
-        guard var mergedTokens = chunkOutputs.first else {
+        guard var mergedTokens = chunkOutputs.first?.tokens else {
             return await manager.processTranscriptionResult(
                 tokenIds: [],
                 timestamps: [],
                 confidences: [],
                 encoderSequenceLength: 0,
                 audioSampleCount: totalSamples,
-                processingTime: Date().timeIntervalSince(startTime)
+                processingTime: Date().timeIntervalSince(startTime),
+                phraseBiasingMetrics: phraseBiasing == nil ? nil : PhraseBiasingMetrics()
             )
         }
 
@@ -326,7 +339,7 @@ extension ChunkProcessor {
             for chunk in chunkOutputs.dropFirst() {
                 mergedTokens = mergeChunks(
                     mergedTokens,
-                    chunk,
+                    chunk.tokens,
                     spliceSafeTokenIds: spliceSafeTokenIds,
                     caseVariantIds: caseVariantIds
                 )
@@ -343,6 +356,8 @@ extension ChunkProcessor {
         let allTimestamps = mergedTokens.map { $0.timestamp }
         let allConfidences = mergedTokens.map { $0.confidence }
         let allDurations = mergedTokens.map { $0.duration }
+        let phraseMetrics = Self.aggregatePhraseBiasingMetrics(
+            chunkOutputs.compactMap(\.phraseBiasingMetrics))
 
         return await manager.processTranscriptionResult(
             tokenIds: allTokens,
@@ -351,7 +366,8 @@ extension ChunkProcessor {
             tokenDurations: allDurations,
             encoderSequenceLength: 0,
             audioSampleCount: totalSamples,
-            processingTime: Date().timeIntervalSince(startTime)
+            processingTime: Date().timeIntervalSince(startTime),
+            phraseBiasingMetrics: phraseMetrics
         )
     }
 
@@ -365,8 +381,9 @@ extension ChunkProcessor {
         using manager: AsrManager,
         decoderLayers: Int,
         maxModelSamples: Int,
-        language: Language?
-    ) async throws -> [TokenWindow] {
+        language: Language?,
+        phraseBiasing: PhraseBiasingConfig?
+    ) async throws -> DualDecodeWindow {
         // A short final chunk fills its window backwards with real audio
         // instead of zero padding (issue #747); no-op for non-final chunks.
         let warmupSamples = Self.lastChunkWarmupSamples(
@@ -384,13 +401,17 @@ extension ChunkProcessor {
         let chunkEnd = isLastChunk ? totalSamples : candidateEnd
 
         if chunkEnd <= chunkStart {
-            return []
+            return DualDecodeWindow(
+                tokens: [],
+                phraseBiasingMetrics: phraseBiasing == nil ? nil : PhraseBiasingMetrics())
         }
         // The final window's audio stops at the last speech-bearing frame —
         // a window ending inside a dead-silence run decodes degenerately.
         let audioEnd = isLastChunk ? min(chunkEnd, speechEndSamples) : chunkEnd
         if audioEnd <= chunkStart {
-            return []
+            return DualDecodeWindow(
+                tokens: [],
+                phraseBiasingMetrics: phraseBiasing == nil ? nil : PhraseBiasingMetrics())
         }
 
         let contextSamples = 0
@@ -401,10 +422,12 @@ extension ChunkProcessor {
             warmupSamples > 0 ? chunkStart / ASRConstants.samplesPerEncoderFrame : nil
         let chunkStartOffset = warmupSamples > 0 ? contextStart : chunkStart
 
-        var decoderState = TdtDecoderState.make(decoderLayers: decoderLayers)
-        decoderState.reset()
+        var decoderState = Self.makeWindowDecoderState(
+            decoderLayers: decoderLayers,
+            phraseBiasing: phraseBiasing
+        )
 
-        let (windowTokens, windowTimestamps, windowConfidences, windowDurations) =
+        let (windowTokens, windowTimestamps, windowConfidences, windowDurations, metrics) =
             try await Self.transcribeChunk(
                 samples: chunkSamplesArray,
                 contextSamples: contextSamples,
@@ -414,6 +437,7 @@ extension ChunkProcessor {
                 decoderState: &decoderState,
                 maxModelSamples: maxModelSamples,
                 language: language,
+                phraseBiasing: phraseBiasing,
                 emitTokensAfterFrame: emitTokensAfterFrame,
                 initialTimeIndexOverride: emitTokensAfterFrame == nil ? nil : 0
             )
@@ -429,10 +453,11 @@ extension ChunkProcessor {
             windowDurations.count == windowTokens.count
             ? windowDurations : Array(repeating: 0, count: windowTokens.count)
 
-        return zip(
+        let tokens = zip(
             zip(zip(windowTokens, windowTimestamps), windowConfidences), durations
         ).map {
             (token: $0.0.0.0, timestamp: $0.0.0.1, confidence: $0.0.1, duration: $0.1)
         }
+        return DualDecodeWindow(tokens: tokens, phraseBiasingMetrics: metrics)
     }
 }

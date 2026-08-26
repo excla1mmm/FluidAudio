@@ -5,6 +5,24 @@ import XCTest
 @testable import FluidAudio
 
 final class AsrManagerTests: XCTestCase {
+    func testASRResultOmitsPhraseMetricsWhenBiasingIsAbsent() throws {
+        let result = ASRResult(text: "ok", confidence: 1, duration: 1, processingTime: 0.1)
+        let object = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: JSONEncoder().encode(result)) as? [String: Any])
+
+        XCTAssertNil(result.phraseBiasingMetrics)
+        XCTAssertNil(object["phraseBiasingMetrics"])
+    }
+
+    func testASRResultExposesPhraseMetricsWhenBiasingIsPresent() throws {
+        let metrics = PhraseBiasingMetrics(boostedTokenDecisions: 3, completedPhrases: 2)
+        let result = ASRResult(
+            text: "ok", confidence: 1, duration: 1, processingTime: 0.1,
+            phraseBiasingMetrics: metrics)
+        let decoded = try JSONDecoder().decode(ASRResult.self, from: JSONEncoder().encode(result))
+
+        XCTAssertEqual(decoded.phraseBiasingMetrics, metrics)
+    }
 
     var manager: AsrManager!
 

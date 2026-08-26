@@ -232,11 +232,12 @@ public actor AsrManager {
         isLastChunk: Bool = false,
         globalFrameOffset: Int = 0,
         language: Language? = nil,
+        phraseBiasing: PhraseBiasingConfig? = nil,
         emitTokensAfterGlobalFrame: Int? = nil,
         initialTimeIndexOverride: Int? = nil
     ) async throws -> TdtHypothesis {
         // Route to appropriate decoder based on model version
-        guard let models = asrModels, let decoder_ = decoderModel, let joint = jointModel else {
+        guard let models = asrModels, let loadedDecoder = decoderModel, let joint = jointModel else {
             throw ASRError.notInitialized
         }
 
@@ -285,6 +286,10 @@ public actor AsrManager {
 
         switch models.version {
         case .v2, .tdtCtc110m:
+            decoderState.preparePhraseBiasing(nil)
+            if phraseBiasing != nil {
+                logger.debug("Ignoring phrase biasing: it is supported by the Parakeet v3 decoder only.")
+            }
             if language != nil {
                 logger.debug(
                     "Ignoring `language` hint: script filtering requires the v3 joint decoder; loaded model is \(models.version)."
@@ -295,7 +300,7 @@ public actor AsrManager {
                 encoderOutput: encoderOutput,
                 encoderSequenceLength: encoderSequenceLength,
                 actualAudioFrames: actualAudioFrames,
-                decoderModel: decoder_,
+                decoderModel: loadedDecoder,
                 jointModel: joint,
                 decoderState: &decoderState,
                 contextFrameAdjustment: contextFrameAdjustment,
@@ -313,7 +318,7 @@ public actor AsrManager {
                 encoderOutput: encoderOutput,
                 encoderSequenceLength: encoderSequenceLength,
                 actualAudioFrames: actualAudioFrames,
-                decoderModel: decoder_,
+                decoderModel: loadedDecoder,
                 jointModel: joint,
                 decoderState: &decoderState,
                 contextFrameAdjustment: contextFrameAdjustment,
@@ -321,10 +326,15 @@ public actor AsrManager {
                 globalFrameOffset: globalFrameOffset,
                 language: language,
                 vocabulary: vocabulary,
+                phraseBiasing: phraseBiasing,
                 emitTokensAfterGlobalFrame: emitTokensAfterGlobalFrame,
                 initialTimeIndexOverride: initialTimeIndexOverride
             )
         case .tdtJa:
+            decoderState.preparePhraseBiasing(nil)
+            if phraseBiasing != nil {
+                logger.debug("Ignoring phrase biasing: it is supported by the Parakeet v3 decoder only.")
+            }
             // The Japanese model outputs Kanji / Hiragana / Katakana, none of
             // which are covered by the current Latin/Cyrillic filter.
             // Propagating `language` here would either be a no-op (if no
@@ -340,7 +350,7 @@ public actor AsrManager {
                 encoderOutput: encoderOutput,
                 encoderSequenceLength: encoderSequenceLength,
                 actualAudioFrames: actualAudioFrames,
-                decoderModel: decoder_,
+                decoderModel: loadedDecoder,
                 jointModel: joint,
                 decoderState: &decoderState,
                 contextFrameAdjustment: contextFrameAdjustment,
@@ -367,10 +377,16 @@ public actor AsrManager {
     public func transcribe(
         _ audioBuffer: AVAudioPCMBuffer,
         decoderState: inout TdtDecoderState,
-        language: Language? = nil
+        language: Language? = nil,
+        phraseBiasing: PhraseBiasingConfig? = nil
     ) async throws -> ASRResult {
         let audioFloatArray = try audioConverter.resampleBuffer(audioBuffer)
-        return try await transcribe(audioFloatArray, decoderState: &decoderState, language: language)
+        return try await transcribe(
+            audioFloatArray,
+            decoderState: &decoderState,
+            language: language,
+            phraseBiasing: phraseBiasing
+        )
     }
 
     /// Transcribe audio from a file URL.
@@ -389,7 +405,10 @@ public actor AsrManager {
     /// - Returns: An ASRResult containing the transcribed text and token timings
     /// - Throws: ASRError if transcription fails, models are not initialized, or the file cannot be read
     public func transcribe(
-        _ url: URL, decoderState: inout TdtDecoderState, language: Language? = nil
+        _ url: URL,
+        decoderState: inout TdtDecoderState,
+        language: Language? = nil,
+        phraseBiasing: PhraseBiasingConfig? = nil
     ) async throws -> ASRResult {
         // Check file size to decide streaming vs memory loading
         if config.streamingEnabled {
@@ -399,12 +418,22 @@ public actor AsrManager {
             let estimatedSamples = Int((Double(audioFile.length) * sampleRateRatio).rounded(.up))
 
             if estimatedSamples > config.streamingThreshold {
-                return try await transcribeDiskBacked(url, decoderState: &decoderState, language: language)
+                return try await transcribeDiskBacked(
+                    url,
+                    decoderState: &decoderState,
+                    language: language,
+                    phraseBiasing: phraseBiasing
+                )
             }
         }
 
         let audioFloatArray = try audioConverter.resampleAudioFile(url)
-        let result = try await transcribe(audioFloatArray, decoderState: &decoderState, language: language)
+        let result = try await transcribe(
+            audioFloatArray,
+            decoderState: &decoderState,
+            language: language,
+            phraseBiasing: phraseBiasing
+        )
         return result
     }
 
@@ -422,7 +451,10 @@ public actor AsrManager {
     /// - Returns: An ASRResult containing the transcribed text and token timings
     /// - Throws: ASRError if transcription fails, models are not initialized, or the file cannot be read
     public func transcribeDiskBacked(
-        _ url: URL, decoderState: inout TdtDecoderState, language: Language? = nil
+        _ url: URL,
+        decoderState: inout TdtDecoderState,
+        language: Language? = nil,
+        phraseBiasing: PhraseBiasingConfig? = nil
     ) async throws -> ASRResult {
         guard isAvailable else { throw ASRError.notInitialized }
 
@@ -456,7 +488,8 @@ public actor AsrManager {
                     guard let self else { return }
                     await self.progressEmitter.report(progress: progress)
                 },
-                language: language
+                language: language,
+                phraseBiasing: phraseBiasing
             )
 
             sampleSource.cleanup()
@@ -492,14 +525,20 @@ public actor AsrManager {
     public func transcribe(
         _ audioSamples: [Float],
         decoderState: inout TdtDecoderState,
-        language: Language? = nil
+        language: Language? = nil,
+        phraseBiasing: PhraseBiasingConfig? = nil
     ) async throws -> ASRResult {
         let shouldEmitProgress = audioSamples.count > ASRConstants.maxModelSamples
         if shouldEmitProgress {
             _ = await progressEmitter.ensureSession()
         }
         do {
-            let result = try await transcribeWithState(audioSamples, decoderState: &decoderState, language: language)
+            let result = try await transcribeWithState(
+                audioSamples,
+                decoderState: &decoderState,
+                language: language,
+                phraseBiasing: phraseBiasing
+            )
 
             if shouldEmitProgress {
                 await progressEmitter.finishSession()

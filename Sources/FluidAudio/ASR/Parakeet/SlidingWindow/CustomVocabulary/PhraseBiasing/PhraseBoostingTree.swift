@@ -10,6 +10,7 @@ public enum PhraseBoostingTreeError: Error, Equatable, Sendable {
 
 /// A lightweight position in a ``PhraseBoostingTree``.
 public struct PhraseBoostingState: Equatable, Sendable {
+    fileprivate let treeIdentifier: UInt64
     fileprivate let nodeIndex: Int
 }
 
@@ -30,10 +31,11 @@ public struct PhraseBoostingTree: Sendable {
     }
 
     private let nodes: [Node]
+    private let treeIdentifier: UInt64
     let phraseCount: Int
 
     public var rootState: PhraseBoostingState {
-        PhraseBoostingState(nodeIndex: 0)
+        PhraseBoostingState(treeIdentifier: treeIdentifier, nodeIndex: 0)
     }
 
     public init(
@@ -119,11 +121,18 @@ public struct PhraseBoostingTree: Sendable {
         }
 
         nodes = buildingNodes
+        treeIdentifier = Self.identifier(
+            tokenSequences: uniqueSequences,
+            contextScore: contextScore,
+            depthScaling: depthScaling
+        )
         phraseCount = uniqueSequences.count
     }
 
     func transition(from state: PhraseBoostingState, token: Int) -> PhraseBoostingTransition {
-        var current = nodes.indices.contains(state.nodeIndex) ? state.nodeIndex : 0
+        var current =
+            state.treeIdentifier == treeIdentifier && nodes.indices.contains(state.nodeIndex)
+            ? state.nodeIndex : 0
         var scoreDelta: Float = 0
 
         while nodes[current].arcs[token] == nil && current != 0 {
@@ -137,7 +146,7 @@ public struct PhraseBoostingTree: Sendable {
         if let next = nodes[current].arcs[token] {
             scoreDelta += nodes[next].nodeScore - nodes[current].nodeScore
             return PhraseBoostingTransition(
-                state: PhraseBoostingState(nodeIndex: next),
+                state: PhraseBoostingState(treeIdentifier: treeIdentifier, nodeIndex: next),
                 scoreDelta: scoreDelta,
                 completedPhrases: nodes[next].completedOutputs
             )
@@ -148,6 +157,10 @@ public struct PhraseBoostingTree: Sendable {
             scoreDelta: scoreDelta,
             completedPhrases: 0
         )
+    }
+
+    func contains(_ state: PhraseBoostingState) -> Bool {
+        state.treeIdentifier == treeIdentifier && nodes.indices.contains(state.nodeIndex)
     }
 
     var debugSnapshot: String {
@@ -164,5 +177,27 @@ public struct PhraseBoostingTree: Sendable {
             return left < right
         }
         return lhs.count < rhs.count
+    }
+
+    private static func identifier(
+        tokenSequences: [[Int]],
+        contextScore: Float,
+        depthScaling: Float
+    ) -> UInt64 {
+        var hash: UInt64 = 1_469_598_103_934_665_603
+        func combine(_ value: UInt64) {
+            hash ^= value
+            hash &*= 1_099_511_628_211
+        }
+        combine(UInt64(contextScore.bitPattern))
+        combine(UInt64(depthScaling.bitPattern))
+        for sequence in tokenSequences {
+            combine(UInt64(sequence.count))
+            for token in sequence {
+                combine(UInt64(token))
+            }
+            combine(UInt64.max)
+        }
+        return hash
     }
 }

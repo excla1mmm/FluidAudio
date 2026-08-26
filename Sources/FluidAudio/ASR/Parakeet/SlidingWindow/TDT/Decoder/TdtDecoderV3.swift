@@ -112,9 +112,12 @@ internal struct TdtDecoderV3: Sendable {
         globalFrameOffset: Int = 0,
         language: Language? = nil,
         vocabulary: [Int: String]? = nil,
+        phraseBiasing: PhraseBiasingConfig? = nil,
         emitTokensAfterGlobalFrame: Int? = nil,
         initialTimeIndexOverride: Int? = nil
     ) async throws -> TdtHypothesis {
+        decoderState.preparePhraseBiasing(phraseBiasing)
+
         // Early exit for very short audio (< 160ms)
         guard encoderSequenceLength > 1 else {
             return TdtHypothesis(decState: decoderState)
@@ -126,7 +129,7 @@ internal struct TdtDecoderV3: Sendable {
         // Script-filtering consumes top-K; skip the extraction when the caller
         // didn't provide a language (default path), so v3 joint runs don't pay
         // for K-length array allocations they'll never use.
-        let needsTopK = language != nil
+        let needsTopK = Self.needsTopK(language: language, phraseBiasing: phraseBiasing)
 
         // Build a stride-aware view so we can access encoder frames without extra copies
         let encoderFrames = try EncoderFrameView(
@@ -137,6 +140,8 @@ internal struct TdtDecoderV3: Sendable {
 
         var hypothesis = TdtHypothesis(decState: decoderState)
         hypothesis.lastToken = decoderState.lastToken
+        var phraseState = decoderState.phraseBiasingState
+        var phraseMetrics = decoderState.phraseBiasingMetrics
 
         // Initialize time tracking for frame navigation
         // timeIndices: Current position in encoder frames (advances by duration)
@@ -281,22 +286,17 @@ internal struct TdtDecoderV3: Sendable {
 
             let blankId = config.tdtConfig.blankId  // 8192 for v3 models
 
-            Self.tokenLanguageFilter(
+            var phraseAddedScore = Self.applyTokenSelection(
                 label: &label,
                 score: &score,
                 topKIds: decision.topKIds,
                 topKLogits: decision.topKLogits,
                 language: language,
                 vocabulary: vocabulary,
-                blankId: blankId
+                blankId: blankId,
+                phraseState: phraseState,
+                phraseBiasing: phraseBiasing
             )
-            if Self.englishBlocklistApplies(to: language),
-                let ids = decision.topKIds, let logits = decision.topKLogits, let vocab = vocabulary
-            {
-                Self.applyEnglishBlocklist(
-                    label: &label, score: &score,
-                    topKIds: ids, topKLogits: logits, vocabulary: vocab, blankId: blankId)
-            }
 
             // Map duration bin to actual frame count
             // durationBins typically = [0,1,2,3,4] meaning skip 0-4 frames
@@ -368,23 +368,17 @@ internal struct TdtDecoderV3: Sendable {
                 label = innerDecision.token
                 score = TdtDurationMapping.clampProbability(innerDecision.probability)
 
-                Self.tokenLanguageFilter(
+                phraseAddedScore = Self.applyTokenSelection(
                     label: &label,
                     score: &score,
                     topKIds: innerDecision.topKIds,
                     topKLogits: innerDecision.topKLogits,
                     language: language,
                     vocabulary: vocabulary,
-                    blankId: blankId
+                    blankId: blankId,
+                    phraseState: phraseState,
+                    phraseBiasing: phraseBiasing
                 )
-                if Self.englishBlocklistApplies(to: language),
-                    let ids = innerDecision.topKIds, let logits = innerDecision.topKLogits,
-                    let vocab = vocabulary
-                {
-                    Self.applyEnglishBlocklist(
-                        label: &label, score: &score,
-                        topKIds: ids, topKLogits: logits, vocabulary: vocab, blankId: blankId)
-                }
 
                 duration = try TdtDurationMapping.mapDurationBin(
                     innerDecision.durationBin, durationBins: config.tdtConfig.durationBins)
@@ -411,6 +405,22 @@ internal struct TdtDecoderV3: Sendable {
                 tokensProcessedThisChunk += 1
                 if tokensProcessedThisChunk > config.tdtConfig.maxTokensPerChunk {
                     break
+                }
+
+                if let config = phraseBiasing,
+                    var currentPhraseState = phraseState,
+                    var currentPhraseMetrics = phraseMetrics
+                {
+                    TdtPhraseRescorer.commit(
+                        token: label,
+                        blankId: blankId,
+                        addedScore: phraseAddedScore,
+                        state: &currentPhraseState,
+                        metrics: &currentPhraseMetrics,
+                        config: config
+                    )
+                    phraseState = currentPhraseState
+                    phraseMetrics = currentPhraseMetrics
                 }
 
                 let emissionTimestamp = timeIndicesCurrentLabels + globalFrameOffset
@@ -527,8 +537,19 @@ internal struct TdtDecoderV3: Sendable {
                     needsTopK: needsTopK
                 )
 
-                let token = decision.token
-                let score = TdtDurationMapping.clampProbability(decision.probability)
+                var token = decision.token
+                var score = TdtDurationMapping.clampProbability(decision.probability)
+                let phraseAddedScore = Self.applyTokenSelection(
+                    label: &token,
+                    score: &score,
+                    topKIds: decision.topKIds,
+                    topKLogits: decision.topKLogits,
+                    language: phraseBiasing == nil ? nil : language,
+                    vocabulary: vocabulary,
+                    blankId: config.tdtConfig.blankId,
+                    phraseState: phraseState,
+                    phraseBiasing: phraseBiasing
+                )
 
                 // Also get duration for proper timestamp calculation
                 let duration = try TdtDurationMapping.mapDurationBin(
@@ -538,6 +559,22 @@ internal struct TdtDecoderV3: Sendable {
                     consecutiveBlanks += 1
                 } else {
                     consecutiveBlanks = 0  // Reset on non-blank
+
+                    if let config = phraseBiasing,
+                        var currentPhraseState = phraseState,
+                        var currentPhraseMetrics = phraseMetrics
+                    {
+                        TdtPhraseRescorer.commit(
+                            token: token,
+                            blankId: self.config.tdtConfig.blankId,
+                            addedScore: phraseAddedScore,
+                            state: &currentPhraseState,
+                            metrics: &currentPhraseMetrics,
+                            config: config
+                        )
+                        phraseState = currentPhraseState
+                        phraseMetrics = currentPhraseMetrics
+                    }
 
                     let finalTimestamp =
                         min(finalProcessingTimeIndices, effectiveSequenceLength - 1) + globalFrameOffset
@@ -582,6 +619,8 @@ internal struct TdtDecoderV3: Sendable {
             decoderState = finalState
         }
         decoderState.lastToken = hypothesis.lastToken
+        decoderState.phraseBiasingState = phraseState
+        decoderState.phraseBiasingMetrics = phraseMetrics
 
         // Clear cached predictor output if ending with punctuation
         // This prevents punctuation from being duplicated at chunk boundaries
@@ -599,10 +638,9 @@ internal struct TdtDecoderV3: Sendable {
             isLastChunk: isLastChunk
         )
 
-        // Script filtering runs per step in the main and inner decode loops.
-        // The last-chunk flush loop was empirically blank/punct-dominated on
-        // the issue #512 Polish samples (0 filter swaps across 7 clips), so no
-        // filter call is needed here; post-processing handles deduplication.
+        // With phrase biasing enabled, final-flush candidates use the same
+        // language-first selection policy as the main and inner loops. The nil
+        // phrase path preserves the existing final-flush behavior.
         return hypothesis
     }
 
@@ -612,6 +650,100 @@ internal struct TdtDecoderV3: Sendable {
     ) -> Bool {
         guard let emitTokensAfterGlobalFrame else { return true }
         return emissionTimestamp >= emitTokensAfterGlobalFrame
+    }
+
+    static func needsTopK(language: Language?, phraseBiasing: PhraseBiasingConfig?) -> Bool {
+        language != nil || phraseBiasing != nil
+    }
+
+    /// Applies existing language policy first, then performs phrase shallow fusion
+    /// over the remaining candidates. A nil phrase config preserves the previous
+    /// language-only selection path.
+    @discardableResult
+    static func applyTokenSelection(
+        label: inout Int,
+        score: inout Float,
+        topKIds: [Int]?,
+        topKLogits: [Float]?,
+        language: Language?,
+        vocabulary: [Int: String]?,
+        blankId: Int,
+        phraseState: PhraseBoostingState?,
+        phraseBiasing: PhraseBiasingConfig?
+    ) -> Float {
+        tokenLanguageFilter(
+            label: &label,
+            score: &score,
+            topKIds: topKIds,
+            topKLogits: topKLogits,
+            language: language,
+            vocabulary: vocabulary,
+            blankId: blankId
+        )
+        if englishBlocklistApplies(to: language),
+            let ids = topKIds,
+            let logits = topKLogits,
+            let vocabulary
+        {
+            applyEnglishBlocklist(
+                label: &label,
+                score: &score,
+                topKIds: ids,
+                topKLogits: logits,
+                vocabulary: vocabulary,
+                blankId: blankId
+            )
+        }
+
+        guard let phraseBiasing,
+            let phraseState,
+            let topKIds,
+            let topKLogits,
+            topKIds.count == topKLogits.count
+        else { return 0 }
+
+        var eligibleIds: [Int] = []
+        var eligibleLogits: [Float] = []
+        eligibleIds.reserveCapacity(min(64, topKIds.count))
+        eligibleLogits.reserveCapacity(min(64, topKLogits.count))
+
+        for index in 0..<min(64, topKIds.count) {
+            let token = topKIds[index]
+            if token != blankId, let language, let vocabulary {
+                guard let piece = vocabulary[token],
+                    TokenLanguageFilter.matches(piece, script: language.script)
+                else { continue }
+                if englishBlocklistApplies(to: language), englishBlocklistIds.contains(token) {
+                    continue
+                }
+            }
+            eligibleIds.append(token)
+            eligibleLogits.append(topKLogits[index])
+        }
+
+        guard
+            let selection = TdtPhraseRescorer.selectCandidate(
+                topKIds: eligibleIds,
+                topKLogits: eligibleLogits,
+                blankId: blankId,
+                state: phraseState,
+                config: phraseBiasing
+            )
+        else { return 0 }
+
+        label = selection.token
+        if let selectedIndex = eligibleIds.firstIndex(of: selection.token) {
+            score = TdtDurationMapping.clampProbability(
+                topKProbability(logits: eligibleLogits, selectedIndex: selectedIndex))
+        }
+        return selection.addedScore
+    }
+
+    private static func topKProbability(logits: [Float], selectedIndex: Int) -> Float {
+        guard logits.indices.contains(selectedIndex), let maximum = logits.max() else { return 0 }
+        let denominator = logits.reduce(Float(0)) { $0 + expf($1 - maximum) }
+        guard denominator > 0 else { return 0 }
+        return expf(logits[selectedIndex] - maximum) / denominator
     }
 
     // MARK: - Private Helper Methods

@@ -24,6 +24,11 @@ public struct TdtDecoderState: Sendable {
     /// - zero: Decoder exactly at the end of encoder frames
     var timeJump: Int?
 
+    /// Per-decoder phrase graph position. The immutable tree remains in the
+    /// caller-provided config and can be shared across parallel windows.
+    var phraseBiasingState: PhraseBoostingState?
+    var phraseBiasingMetrics: PhraseBiasingMetrics?
+
     /// Initialize decoder state with specified number of LSTM layers.
     /// - Parameter decoderLayers: Number of decoder LSTM layers (default: 2)
     ///   - v2 and v3 models: 2 layers (default)
@@ -67,6 +72,8 @@ public struct TdtDecoderState: Sendable {
         cellState = try MLMultiArray(shape: other.cellState.shape, dataType: .float32)
         lastToken = other.lastToken
         timeJump = other.timeJump
+        phraseBiasingState = other.phraseBiasingState
+        phraseBiasingMetrics = other.phraseBiasingMetrics
 
         hiddenState.copyData(from: other.hiddenState)
         cellState.copyData(from: other.cellState)
@@ -79,6 +86,24 @@ public struct TdtDecoderState: Sendable {
         lastToken = nil
         predictorOutput = nil
         timeJump = nil
+        phraseBiasingState = nil
+        phraseBiasingMetrics = nil
+    }
+
+    mutating func preparePhraseBiasing(_ config: PhraseBiasingConfig?) {
+        guard let config else {
+            phraseBiasingState = nil
+            phraseBiasingMetrics = nil
+            return
+        }
+        guard let state = phraseBiasingState, config.tree.contains(state) else {
+            phraseBiasingState = config.tree.rootState
+            phraseBiasingMetrics = PhraseBiasingMetrics()
+            return
+        }
+        if phraseBiasingMetrics == nil {
+            phraseBiasingMetrics = PhraseBiasingMetrics()
+        }
     }
 
     /// Finalize the decoder state for the last chunk

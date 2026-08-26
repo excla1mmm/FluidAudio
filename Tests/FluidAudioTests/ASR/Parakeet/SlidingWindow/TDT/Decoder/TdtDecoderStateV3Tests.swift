@@ -24,10 +24,49 @@ final class TdtDecoderStateV3Tests: XCTestCase {
         XCTAssertNil(state.lastToken)
         XCTAssertNil(state.predictorOutput)
         XCTAssertNil(state.timeJump)
+        XCTAssertNil(state.phraseBiasingState)
+        XCTAssertNil(state.phraseBiasingMetrics)
 
         // Verify arrays are zeroed
         verifyArrayIsZero(state.hiddenState)
         verifyArrayIsZero(state.cellState)
+    }
+
+    func testPhraseBiasingStateCopiesAndResetClearsIt() throws {
+        let config = PhraseBiasingConfig(
+            tree: try PhraseBoostingTree(tokenSequences: [[1, 2]]),
+            alpha: 1,
+            maximumTokenBoost: 2
+        )
+        var original = try TdtDecoderState()
+        original.preparePhraseBiasing(config)
+        let transition = config.tree.transition(from: config.tree.rootState, token: 1)
+        original.phraseBiasingState = transition.state
+        original.phraseBiasingMetrics = PhraseBiasingMetrics(
+            boostedTokenDecisions: 1, completedPhrases: 0)
+
+        let copied = try TdtDecoderState(from: original)
+        XCTAssertEqual(copied.phraseBiasingState, transition.state)
+        XCTAssertEqual(copied.phraseBiasingMetrics?.boostedTokenDecisions, 1)
+
+        original.reset()
+        XCTAssertNil(original.phraseBiasingState)
+        XCTAssertNil(original.phraseBiasingMetrics)
+    }
+
+    func testPreparingDifferentTreeRestartsPhraseStateAtRoot() throws {
+        let first = PhraseBiasingConfig(
+            tree: try PhraseBoostingTree(tokenSequences: [[1, 2]]), alpha: 1, maximumTokenBoost: 2)
+        let second = PhraseBiasingConfig(
+            tree: try PhraseBoostingTree(tokenSequences: [[9, 8]]), alpha: 1, maximumTokenBoost: 2)
+        var state = try TdtDecoderState()
+        state.preparePhraseBiasing(first)
+        state.phraseBiasingState = first.tree.transition(from: first.tree.rootState, token: 1).state
+
+        state.preparePhraseBiasing(second)
+
+        XCTAssertEqual(state.phraseBiasingState, second.tree.rootState)
+        XCTAssertEqual(state.phraseBiasingMetrics, PhraseBiasingMetrics())
     }
 
     func testCopyInitialization() throws {

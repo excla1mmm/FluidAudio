@@ -5,6 +5,80 @@ import XCTest
 @testable import FluidAudio
 
 final class TdtDecoderChunkTests: XCTestCase {
+    func testNeedsTopKForLanguageOrPhraseBiasing() throws {
+        let phraseBiasing = PhraseBiasingConfig(
+            tree: try PhraseBoostingTree(tokenSequences: [[1]]), alpha: 1, maximumTokenBoost: 2)
+
+        XCTAssertFalse(TdtDecoderV3.needsTopK(language: nil, phraseBiasing: nil))
+        XCTAssertTrue(TdtDecoderV3.needsTopK(language: .russian, phraseBiasing: nil))
+        XCTAssertTrue(TdtDecoderV3.needsTopK(language: nil, phraseBiasing: phraseBiasing))
+    }
+
+    func testNilPhraseConfigurationLeavesDefaultDecisionUntouched() {
+        var label = 42
+        var score: Float = 0.375
+
+        let addedScore = TdtDecoderV3.applyTokenSelection(
+            label: &label,
+            score: &score,
+            topKIds: nil,
+            topKLogits: nil,
+            language: nil,
+            vocabulary: nil,
+            blankId: 99,
+            phraseState: nil,
+            phraseBiasing: nil
+        )
+
+        XCTAssertEqual(label, 42)
+        XCTAssertEqual(score, 0.375)
+        XCTAssertEqual(addedScore, 0)
+    }
+
+    func testPhraseSelectionRunsAfterLanguageFiltering() throws {
+        let tree = try PhraseBoostingTree(tokenSequences: [[10], [11]], contextScore: 4)
+        let phraseBiasing = PhraseBiasingConfig(tree: tree, alpha: 2, maximumTokenBoost: 10)
+        var label = 10
+        var score: Float = 0.5
+
+        let addedScore = TdtDecoderV3.applyTokenSelection(
+            label: &label,
+            score: &score,
+            topKIds: [10, 11, 99],
+            topKLogits: [3, 2, 4],
+            language: .russian,
+            vocabulary: [10: "hello", 11: "привет", 99: ""],
+            blankId: 99,
+            phraseState: tree.rootState,
+            phraseBiasing: phraseBiasing
+        )
+
+        XCTAssertEqual(label, 11, "Latin phrase boost must not bypass the Russian script hint")
+        XCTAssertGreaterThan(addedScore, 0)
+    }
+
+    func testSharedSelectionSupportsPrimaryInnerAndFinalDecisions() throws {
+        let tree = try PhraseBoostingTree(tokenSequences: [[7]], contextScore: 4)
+        let phraseBiasing = PhraseBiasingConfig(tree: tree, alpha: 1, maximumTokenBoost: 3)
+
+        for phase in ["primary", "inner", "final"] {
+            var label = 8
+            var score: Float = 0.5
+            let addedScore = TdtDecoderV3.applyTokenSelection(
+                label: &label,
+                score: &score,
+                topKIds: [8, 7, 9],
+                topKLogits: [1, 0, 2],
+                language: nil,
+                vocabulary: nil,
+                blankId: 9,
+                phraseState: tree.rootState,
+                phraseBiasing: phraseBiasing
+            )
+            XCTAssertEqual(label, 7, "Phrase selection failed in \(phase) phase")
+            XCTAssertGreaterThan(addedScore, 0)
+        }
+    }
 
     private var decoder: TdtDecoderV3!
     private var config: ASRConfig!

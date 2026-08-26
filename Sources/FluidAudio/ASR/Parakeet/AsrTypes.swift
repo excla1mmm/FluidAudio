@@ -82,13 +82,15 @@ public struct ASRResult: Codable, Sendable {
     public let performanceMetrics: ASRPerformanceMetrics?
     public let ctcDetectedTerms: [String]?
     public let ctcAppliedTerms: [String]?
+    public let phraseBiasingMetrics: PhraseBiasingMetrics?
 
     public init(
         text: String, confidence: Float, duration: TimeInterval, processingTime: TimeInterval,
         tokenTimings: [TokenTiming]? = nil,
         performanceMetrics: ASRPerformanceMetrics? = nil,
         ctcDetectedTerms: [String]? = nil,
-        ctcAppliedTerms: [String]? = nil
+        ctcAppliedTerms: [String]? = nil,
+        phraseBiasingMetrics: PhraseBiasingMetrics? = nil
     ) {
         self.text = text
         self.confidence = confidence
@@ -98,6 +100,7 @@ public struct ASRResult: Codable, Sendable {
         self.performanceMetrics = performanceMetrics
         self.ctcDetectedTerms = ctcDetectedTerms
         self.ctcAppliedTerms = ctcAppliedTerms
+        self.phraseBiasingMetrics = phraseBiasingMetrics
     }
 
     /// Real-time factor (RTFx) - how many times faster than real-time
@@ -121,7 +124,8 @@ public struct ASRResult: Codable, Sendable {
             tokenTimings: tokenTimings,
             performanceMetrics: performanceMetrics,
             ctcDetectedTerms: detected,
-            ctcAppliedTerms: applied
+            ctcAppliedTerms: applied,
+            phraseBiasingMetrics: phraseBiasingMetrics
         )
     }
 }
