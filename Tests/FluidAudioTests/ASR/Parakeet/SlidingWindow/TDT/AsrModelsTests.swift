@@ -5,6 +5,15 @@ import XCTest
 @testable import FluidAudio
 
 final class AsrModelsTests: XCTestCase {
+    func testLogSafePathDoesNotExposeParentDirectories() {
+        let url = URL(fileURLWithPath: "/Users/private/Application Support/FluidAudio/parakeet-v3")
+
+        let label = AsrModels.logSafePath(url)
+
+        XCTAssertEqual(label, "parakeet-v3")
+        XCTAssertFalse(label.contains("/Users/private"))
+    }
+
 
     // MARK: - Model Names Tests
 

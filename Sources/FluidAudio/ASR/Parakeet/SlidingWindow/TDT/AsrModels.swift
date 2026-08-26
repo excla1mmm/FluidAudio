@@ -72,6 +72,11 @@ public struct AsrModels: Sendable {
 
     private static let logger = AppLogger(category: "AsrModels")
 
+    static func logSafePath(_ url: URL) -> String {
+        let name = url.lastPathComponent
+        return name.isEmpty ? "model-cache" : name
+    }
+
     public init(
         encoder: MLModel?,
         preprocessor: MLModel,
@@ -234,7 +239,7 @@ extension AsrModels {
         encoderComputeUnits: MLComputeUnits? = nil,
         progressHandler: ProgressHandler? = nil
     ) async throws -> AsrModels {
-        logger.info("Loading ASR models from: \(directory.path)")
+        logger.info("Loading ASR models from cache entry: \(logSafePath(directory))")
 
         let config = configuration ?? defaultConfiguration()
 
@@ -325,7 +330,7 @@ extension AsrModels {
                 if ctcHeadModel != nil {
                     logger.info("[Beta] Loaded CTC head model from local directory")
                 } else {
-                    logger.warning("CTC head model found but failed to load: \(ctcHeadPath.path)")
+                    logger.warning("CTC head model found but failed to load: \(logSafePath(ctcHeadPath))")
                 }
             }
 
@@ -369,7 +374,7 @@ extension AsrModels {
 
         if !FileManager.default.fileExists(atPath: vocabPath.path) {
             logger.warning(
-                "Vocabulary file not found at \(vocabPath.path). Please ensure the vocab file is downloaded with the models."
+                "Vocabulary file \(logSafePath(vocabPath)) was not found. Please ensure it is downloaded with the models."
             )
             throw AsrModelsError.modelNotFound(vocabularyFileName, vocabPath)
         }
@@ -396,13 +401,13 @@ extension AsrModels {
                 throw AsrModelsError.loadingFailed("Vocabulary file has unexpected format")
             }
 
-            logger.info("Loaded vocabulary with \(vocabulary.count) tokens from \(vocabPath.path)")
+            logger.info("Loaded vocabulary with \(vocabulary.count) tokens from \(logSafePath(vocabPath))")
             return vocabulary
         } catch let error as AsrModelsError {
             throw error
         } catch {
             logger.error(
-                "Failed to load or parse vocabulary file at \(vocabPath.path): \(error.localizedDescription)"
+                "Failed to load or parse vocabulary file \(logSafePath(vocabPath))"
             )
             throw AsrModelsError.loadingFailed("Vocabulary parsing failed")
         }
@@ -488,12 +493,12 @@ extension AsrModels {
         progressHandler: ProgressHandler? = nil
     ) async throws -> URL {
         let targetDir = directory ?? defaultCacheDirectory(for: version)
-        logger.info("Downloading ASR models to: \(targetDir.path)")
+        logger.info("Downloading ASR models to cache entry: \(logSafePath(targetDir))")
         let parentDir = targetDir.deletingLastPathComponent()
         let downloadVariant: String? = (version == .v3) ? encoderPrecision.rawValue : nil
 
         if !force && modelsExist(at: targetDir, version: version, encoderPrecision: encoderPrecision) {
-            logger.info("ASR models already present at: \(targetDir.path)")
+            logger.info("ASR models already present in cache entry: \(logSafePath(targetDir))")
             return targetDir
         }
 
