@@ -32,7 +32,10 @@ enum LogitsArgmax {
             run(logits.dataPointer.assumingMemoryBound(to: Float32.self))
         } else {
             let count = frames * frameStride
-            let src = logits.dataPointer.assumingMemoryBound(to: Float16.self)
+            // Keep the source as raw IEEE-754 binary16 bits. Swift's Float16
+            // APIs are unavailable for the x86_64 macOS slice of a universal
+            // build, while vImage accepts the same two-byte representation.
+            let src = logits.dataPointer.assumingMemoryBound(to: UInt16.self)
             var buf = [Float](repeating: 0, count: count)
             // The vImage buffers must not outlive the pointers they wrap, so the
             // convert + argmax both run inside the withUnsafe scope.
@@ -41,7 +44,7 @@ enum LogitsArgmax {
                     data: UnsafeMutableRawPointer(mutating: src),
                     height: 1,
                     width: vImagePixelCount(count),
-                    rowBytes: count * MemoryLayout<Float16>.size)
+                    rowBytes: count * MemoryLayout<UInt16>.size)
                 var dstBuf = vImage_Buffer(
                     data: dst.baseAddress!,
                     height: 1,

@@ -1,4 +1,5 @@
 @preconcurrency import CoreML
+import Accelerate
 import Foundation
 
 /// NeuTTS-2E synthesis: prefill → stateful autoregressive decode (top-k
@@ -167,10 +168,18 @@ struct NeuTtsSynthesizer {
                 state.withMultiArray(for: name) { array in
                     array.withUnsafeMutableBytes { rawBuffer, _ in
                         guard let dstBase = rawBuffer.baseAddress else { return }
-                        let dst = dstBase.assumingMemoryBound(to: Float16.self)
-                        for i in 0..<layerElements {
-                            dst[i] = Float16(base[i])
-                        }
+                        var sourceBuffer = vImage_Buffer(
+                            data: UnsafeMutableRawPointer(mutating: base),
+                            height: 1,
+                            width: vImagePixelCount(layerElements),
+                            rowBytes: layerElements * MemoryLayout<Float>.size)
+                        var destinationBuffer = vImage_Buffer(
+                            data: dstBase,
+                            height: 1,
+                            width: vImagePixelCount(layerElements),
+                            rowBytes: layerElements * MemoryLayout<UInt16>.size)
+                        vImageConvert_PlanarFtoPlanar16F(
+                            &sourceBuffer, &destinationBuffer, 0)
                     }
                 }
             }
@@ -227,8 +236,20 @@ struct NeuTtsSynthesizer {
                 dst.baseAddress!.update(from: ptr, count: count)
             }
         case .float16:
-            let ptr = array.dataPointer.assumingMemoryBound(to: Float16.self)
-            for i in 0..<count { out[i] = Float(ptr[i]) }
+            let source = array.dataPointer.assumingMemoryBound(to: UInt16.self)
+            out.withUnsafeMutableBufferPointer { destination in
+                var sourceBuffer = vImage_Buffer(
+                    data: UnsafeMutableRawPointer(mutating: source),
+                    height: 1,
+                    width: vImagePixelCount(count),
+                    rowBytes: count * MemoryLayout<UInt16>.size)
+                var destinationBuffer = vImage_Buffer(
+                    data: destination.baseAddress!,
+                    height: 1,
+                    width: vImagePixelCount(count),
+                    rowBytes: count * MemoryLayout<Float>.size)
+                vImageConvert_Planar16FtoPlanarF(&sourceBuffer, &destinationBuffer, 0)
+            }
         default:
             throw SynthesisError.missingOutput("unexpected dataType \(array.dataType.rawValue)")
         }

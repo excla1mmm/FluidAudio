@@ -474,12 +474,25 @@ public actor ParaformerManager {
                 out.append(Array(UnsafeBufferPointer(start: p + t * frameStride, count: dim)))
             }
         } else {
-            let p = arr.dataPointer.assumingMemoryBound(to: Float16.self)
+            let elementCount = count * frameStride
+            let source = arr.dataPointer.assumingMemoryBound(to: UInt16.self)
+            var widened = [Float](repeating: 0, count: elementCount)
+            widened.withUnsafeMutableBufferPointer { destination in
+                var sourceBuffer = vImage_Buffer(
+                    data: UnsafeMutableRawPointer(mutating: source),
+                    height: 1,
+                    width: vImagePixelCount(elementCount),
+                    rowBytes: elementCount * MemoryLayout<UInt16>.size)
+                var destinationBuffer = vImage_Buffer(
+                    data: destination.baseAddress!,
+                    height: 1,
+                    width: vImagePixelCount(elementCount),
+                    rowBytes: elementCount * MemoryLayout<Float>.size)
+                vImageConvert_Planar16FtoPlanarF(&sourceBuffer, &destinationBuffer, 0)
+            }
             for t in 0..<count {
-                var r = [Float](repeating: 0, count: dim)
                 let base = t * frameStride
-                for d in 0..<dim { r[d] = Float(p[base + d]) }
-                out.append(r)
+                out.append(Array(widened[base..<(base + dim)]))
             }
         }
         return out
