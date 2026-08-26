@@ -180,6 +180,7 @@ public enum ModelHub {
             let remote = try await HFTreeLister.listTree(
                 repoRemotePath: repo.remotePath,
                 startingAt: subPath ?? "",
+                revision: repo.revision,
                 include: { itemPath, isDirectory in
                     if isDirectory {
                         // Descend into ancestors of a pattern and into the
@@ -452,6 +453,7 @@ public enum ModelHub {
         var filesToDownload: [RemoteFile] = try await HFTreeLister.listTree(
             repoRemotePath: repo.remotePath,
             startingAt: subPath ?? "",
+            revision: repo.revision,
             include: include,
             fetch: treeFetch
         )
@@ -480,6 +482,7 @@ public enum ModelHub {
                 let names = Set(missingAux)
                 filesToDownload += try await HFTreeLister.listTree(
                     repoRemotePath: repo.remotePath,
+                    revision: repo.revision,
                     include: { itemPath, isDirectory in
                         !isDirectory && names.contains((itemPath as NSString).lastPathComponent)
                     },
@@ -516,6 +519,8 @@ public enum ModelHub {
                 file: file,
                 from: repo.remotePath,
                 at: destPath,
+                rootDirectory: repoPath,
+                revision: repo.revision,
                 recoveringBlockedPaths: true,
                 config: config,
                 configuration: configuration,
@@ -599,6 +604,7 @@ public enum ModelHub {
         let filesToDownload: [RemoteFile] = try await HFTreeLister.listTree(
             repoRemotePath: repo.remotePath,
             startingAt: subdirectory,
+            revision: repo.revision,
             include: { itemPath, _ in shouldSkip?(itemPath) != true },
             fetch: HFTreeLister.fetch(using: listingSession)
         )
@@ -675,6 +681,8 @@ public enum ModelHub {
             file: file,
             from: repo.remotePath,
             at: destPath,
+            rootDirectory: repoDirectory,
+            revision: repo.revision,
             recoveringBlockedPaths: false,
             config: config,
             configuration: configuration,

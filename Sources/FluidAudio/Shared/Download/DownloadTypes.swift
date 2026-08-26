@@ -12,6 +12,7 @@ public enum DownloadError: LocalizedError {
     case modelNotFound(path: String)
     case htmlErrorResponse(path: String, snippet: String)
     case invalidArtifact(path: String, reason: String)
+    case unsafeRemotePath(String)
 
     /// The byte stream stalled: fewer than `DownloadConfig.minStallBytes`
     /// arrived within `window` seconds, so the transfer was cancelled early
@@ -43,6 +44,8 @@ public enum DownloadError: LocalizedError {
             return "Model file not found: \(path)"
         case .invalidArtifact(let path, let reason):
             return "Downloaded artifact for \(path) is invalid (\(reason)); refusing to cache it."
+        case .unsafeRemotePath(let path):
+            return "Hugging Face returned an unsafe repository path: \(path.debugDescription)"
         case .stalled(let path, let window):
             return
                 "Download of \(path) stalled (no meaningful progress for \(Int(window))s); cancelled for retry."

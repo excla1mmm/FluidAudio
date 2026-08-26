@@ -16,8 +16,13 @@ public enum BpeNormalization: Sendable {
 /// Text normalization: Applies lowercasing + NFKC normalization before BPE encoding,
 /// matching the standard NeMo CTC tokenization pipeline.
 public final class BpeTokenizer: Sendable {
+    private struct MergePair: Hashable, Sendable {
+        let first: String
+        let second: String
+    }
+
     private let vocab: [String: Int]
-    private let merges: [(String, String)]
+    private let mergeRanks: [MergePair: Int]
     private let addedTokens: [String: Int]
     private let normalization: BpeNormalization
 
@@ -128,7 +133,12 @@ public final class BpeTokenizer: Sendable {
         normalization: BpeNormalization
     ) {
         self.vocab = vocab
-        self.merges = merges
+        var mergeRanks: [MergePair: Int] = [:]
+        for (rank, merge) in merges.enumerated() {
+            mergeRanks[MergePair(first: merge.0, second: merge.1)] =
+                mergeRanks[MergePair(first: merge.0, second: merge.1)] ?? rank
+        }
+        self.mergeRanks = mergeRanks
         self.addedTokens = addedTokens
         self.normalization = normalization
     }
@@ -183,7 +193,7 @@ public final class BpeTokenizer: Sendable {
                 let pair = (word[i], word[i + 1])
 
                 // Check if this pair has a merge rule
-                guard let mergeIndex = merges.firstIndex(where: { $0.0 == pair.0 && $0.1 == pair.1 }) else {
+                guard let mergeIndex = mergeRank(first: pair.0, second: pair.1) else {
                     continue
                 }
 
@@ -225,5 +235,9 @@ public final class BpeTokenizer: Sendable {
             // Unknown token - return <unk> ID if available
             return addedTokens["<unk>"] ?? vocab["<unk>"] ?? 0
         }
+    }
+
+    func mergeRank(first: String, second: String) -> Int? {
+        mergeRanks[MergePair(first: first, second: second)]
     }
 }

@@ -578,7 +578,11 @@ extension AsrModels {
         }
 
         logger.info("Vocabulary \(vocabularyFileName) missing after model download; fetching directly")
-        let remoteURL = try ModelRegistry.resolveModel(version.repo.remotePath, vocabularyFileName)
+        let remoteURL = try ModelRegistry.resolveModel(
+            version.repo.remotePath,
+            vocabularyFileName,
+            revision: version.repo.revision
+        )
         let data = try await ModelHub.fetchFile(
             from: remoteURL, description: vocabularyFileName)
         try FileManager.default.createDirectory(

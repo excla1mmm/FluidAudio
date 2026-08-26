@@ -278,6 +278,20 @@ final class ModelRegistryTests: XCTestCase {
             "An empty override map must not alter the upstream path")
     }
 
+    func testParakeetV3ProductionRevisionIsImmutable() throws {
+        let url = try ModelRegistry.resolveModel(
+            Repo.parakeetV3.remotePath,
+            "config.json",
+            revision: Repo.parakeetV3.revision
+        )
+
+        XCTAssertEqual(
+            url.absoluteString,
+            "https://huggingface.co/FluidInference/parakeet-tdt-0.6b-v3-coreml/resolve/\(Repo.parakeetV3Revision)/config.json"
+        )
+        XCTAssertNotEqual(Repo.parakeetV3.revision, "main")
+    }
+
     func testOverrideRedirectsResolveModel() throws {
         ModelRegistry.repoOverrides = [
             "FluidInference/parakeet-tdt-0.6b-v3-coreml": "DictionLabs/parakeet-tdt-0.6b-v3-coreml"

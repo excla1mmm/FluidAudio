@@ -37,11 +37,16 @@ enum FileDownloader {
         file: RemoteFile,
         from repoRemotePath: String,
         at destination: URL,
+        rootDirectory: URL? = nil,
+        revision: String = "main",
         recoveringBlockedPaths: Bool,
         config: DownloadConfig = .default,
         configuration: URLSessionConfiguration? = nil,
         onBytes: (@Sendable (Int64, Int64) -> Void)? = nil
     ) async throws -> Outcome {
+        if let rootDirectory {
+            try DownloadPathSafety.validateLocalDestination(destination, in: rootDirectory)
+        }
         if FileManager.default.fileExists(atPath: destination.path) {
             return .alreadyPresent
         }
@@ -54,6 +59,9 @@ enum FileDownloader {
             try FileManager.default.createDirectory(
                 at: parentDir, withIntermediateDirectories: true)
         }
+        if let rootDirectory {
+            try DownloadPathSafety.validateLocalDestination(destination, in: rootDirectory)
+        }
 
         // HuggingFace returns 500 for 0-byte files — create empty file locally.
         if file.size == 0 {
@@ -63,7 +71,7 @@ enum FileDownloader {
 
         let encodedPath =
             file.path.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? file.path
-        let fileURL = try ModelRegistry.resolveModel(repoRemotePath, encodedPath)
+        let fileURL = try ModelRegistry.resolveModel(repoRemotePath, encodedPath, revision: revision)
         let request = HFClient.authorizedRequest(url: fileURL, timeout: config.timeout)
 
         let tempURL = try await download(
@@ -78,6 +86,9 @@ enum FileDownloader {
 
         if FileManager.default.fileExists(atPath: destination.path) {
             try? FileManager.default.removeItem(at: destination)
+        }
+        if let rootDirectory {
+            try DownloadPathSafety.validateLocalDestination(destination, in: rootDirectory)
         }
         try FileManager.default.moveItem(at: tempURL, to: destination)
         return .downloaded

@@ -255,6 +255,57 @@ final class HFTreeListerTests: XCTestCase {
             // expected
         }
     }
+
+    func testRejectsNoncanonicalAndEscapingRemotePathsBeforeInclude() async throws {
+        for unsafePath in ["../outside.bin", "bundle/../../outside.bin", "/absolute.bin", "a\\b.bin", "a//b.bin", "a/./b.bin", "nul\u{0000}.bin"] {
+            let server = PageServer()
+            try server.addPage(
+                url: treeURL(),
+                items: [["path": unsafePath, "type": "file", "size": 1]]
+            )
+
+            do {
+                _ = try await HFTreeLister.listTree(
+                    repoRemotePath: Self.repo,
+                    include: { _, _ in true },
+                    fetch: server.fetch
+                )
+                XCTFail("Expected unsafe remote path rejection for \(unsafePath.debugDescription)")
+            } catch DownloadError.unsafeRemotePath(let path) {
+                XCTAssertEqual(path, unsafePath)
+            }
+        }
+    }
+
+    func testFileDownloaderRejectsDestinationThroughEscapingSymlink() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("download-root-\(UUID().uuidString)", isDirectory: true)
+        let outside = FileManager.default.temporaryDirectory
+            .appendingPathComponent("download-outside-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: outside, withIntermediateDirectories: true)
+        defer {
+            try? FileManager.default.removeItem(at: root)
+            try? FileManager.default.removeItem(at: outside)
+        }
+        try FileManager.default.createSymbolicLink(
+            at: root.appendingPathComponent("escape"),
+            withDestinationURL: outside
+        )
+
+        do {
+            _ = try await FileDownloader.ensure(
+                file: RemoteFile(path: "escape/model.bin", size: 0),
+                from: Self.repo,
+                at: root.appendingPathComponent("escape/model.bin"),
+                rootDirectory: root,
+                recoveringBlockedPaths: true
+            )
+            XCTFail("Expected escaping symlink rejection")
+        } catch DownloadError.unsafeRemotePath {
+            XCTAssertFalse(FileManager.default.fileExists(atPath: outside.appendingPathComponent("model.bin").path))
+        }
+    }
 }
 
 // MARK: - Link-capable URLProtocol stub

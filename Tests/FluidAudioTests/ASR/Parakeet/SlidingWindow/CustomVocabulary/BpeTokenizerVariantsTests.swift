@@ -177,6 +177,13 @@ final class BpeTokenizerVariantsTests: XCTestCase {
         )
     }
 
+    func testMergeRanksUseIndexedEarliestRuleLookup() throws {
+        let (tokenizer, _) = try loadGoldenTokenizer()
+
+        XCTAssertEqual(tokenizer.mergeRank(first: "▁", second: "М"), 12)
+        XCTAssertNil(tokenizer.mergeRank(first: "not", second: "present"))
+    }
+
     func testMalformedMergeEntryIsRejected() throws {
         let data = try Data(contentsOf: goldenFixtureURL)
         var json = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])

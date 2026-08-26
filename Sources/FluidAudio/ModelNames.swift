@@ -2,6 +2,7 @@ import Foundation
 
 /// Model repositories on HuggingFace
 public enum Repo: String, CaseIterable, Sendable {
+    public static let parakeetV3Revision = "7dd20fe6b1797d35f5e3307e8b1732d9a178edfe"
     case vad = "FluidInference/silero-vad-coreml"
     case parakeetV3 = "FluidInference/parakeet-tdt-0.6b-v3-coreml"
     case parakeetV2 = "FluidInference/parakeet-tdt-0.6b-v2-coreml"
@@ -311,6 +312,11 @@ public enum Repo: String, CaseIterable, Sendable {
         default:
             return name.replacingOccurrences(of: "-coreml", with: "")
         }
+    }
+
+    /// Immutable Hugging Face revision used by security-sensitive model downloads.
+    public var revision: String {
+        self == .parakeetV3 ? Self.parakeetV3Revision : "main"
     }
 }
 
