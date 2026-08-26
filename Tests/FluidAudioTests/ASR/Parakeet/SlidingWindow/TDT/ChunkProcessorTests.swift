@@ -29,6 +29,15 @@ final class ChunkProcessorTests: XCTestCase {
         XCTAssertNil(ChunkProcessor.aggregatePhraseBiasingMetrics([]))
     }
 
+    func testPhraseMetricsAggregateWindowAndSeamRepairDecodes() {
+        let metrics = ChunkProcessor.aggregatePhraseBiasingMetrics(
+            windowMetrics: [PhraseBiasingMetrics(boostedTokenDecisions: 2, completedPhrases: 1)],
+            repairMetrics: [PhraseBiasingMetrics(boostedTokenDecisions: 4, completedPhrases: 3)]
+        )
+
+        XCTAssertEqual(metrics, PhraseBiasingMetrics(boostedTokenDecisions: 6, completedPhrases: 4))
+    }
+
     // MARK: - Test Setup
 
     private func createMockAudioSamples(durationSeconds: Double, sampleRate: Int = 16000) -> [Float] {

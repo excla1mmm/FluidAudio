@@ -45,6 +45,13 @@ struct ChunkProcessor {
         }
     }
 
+    static func aggregatePhraseBiasingMetrics(
+        windowMetrics: [PhraseBiasingMetrics],
+        repairMetrics: [PhraseBiasingMetrics]
+    ) -> PhraseBiasingMetrics? {
+        aggregatePhraseBiasingMetrics(windowMetrics + repairMetrics)
+    }
+
     // Stateless chunking aligned with CoreML reference:
     // - process ~14.96s of audio per window (frame-aligned) to stay under encoder limit
     // - 2.0s overlap (frame-aligned) to give the decoder slack when merging windows
@@ -523,6 +530,7 @@ struct ChunkProcessor {
 
         var chunkOutputs: [[TokenWindow]?] = []
         var phraseMetrics: [PhraseBiasingMetrics] = []
+        var repairPhraseMetrics: [PhraseBiasingMetrics] = []
         var availableWorkers = Array(workers.indices)
         var inFlight = 0
         var chunkDecision = chunkStarts.first ?? ChunkStartDecision(start: 0, useWarmupPrefix: false)
@@ -738,7 +746,7 @@ struct ChunkProcessor {
             let minGapSeconds = await manager.seamGapRepairMinGapSeconds
             let speechRmsThreshold = try adaptiveSpeechRmsThreshold()
 
-            mergedTokens = try await repairSeamGaps(
+            let repair = try await repairSeamGaps(
                 in: mergedTokens,
                 using: workers[0],
                 decoderLayers: decoderLayers,
@@ -750,6 +758,8 @@ struct ChunkProcessor {
                 language: language,
                 phraseBiasing: activePhraseBiasing
             )
+            mergedTokens = repair.tokens
+            repairPhraseMetrics = repair.phraseBiasingMetrics
         }
 
         let allTokens = mergedTokens.map { $0.token }
@@ -765,7 +775,10 @@ struct ChunkProcessor {
             encoderSequenceLength: 0,  // Not relevant for chunk processing
             audioSampleCount: totalSamples,
             processingTime: Date().timeIntervalSince(startTime),
-            phraseBiasingMetrics: Self.aggregatePhraseBiasingMetrics(phraseMetrics)
+            phraseBiasingMetrics: Self.aggregatePhraseBiasingMetrics(
+                windowMetrics: phraseMetrics,
+                repairMetrics: repairPhraseMetrics
+            )
                 ?? (activePhraseBiasing == nil ? nil : PhraseBiasingMetrics())
         )
     }
@@ -1461,7 +1474,7 @@ struct ChunkProcessor {
         vocabulary: [Int: String],
         language: Language?,
         phraseBiasing: PhraseBiasingConfig?
-    ) async throws -> [TokenWindow] {
+    ) async throws -> (tokens: [TokenWindow], phraseBiasingMetrics: [PhraseBiasingMetrics]) {
         let frameSamples = ASRConstants.samplesPerEncoderFrame
         let frameDuration = ASRConstants.secondsPerEncoderFrame
         let minGapFrames = max(2, Int(minGapSeconds / frameDuration))
@@ -1473,6 +1486,7 @@ struct ChunkProcessor {
         )
 
         var working = tokens
+        var phraseBiasingMetrics: [PhraseBiasingMetrics] = []
         var probes = 0
         var probedGapStarts = Set<Int>()
         // Iterate so a partial recovery's residual gap (start has moved)
@@ -1520,7 +1534,7 @@ struct ChunkProcessor {
                         phraseBiasing: phraseBiasing
                     )
                     let windowAudio = try readSamples(offset: windowStart, count: windowEnd - windowStart)
-                    let (windowTokens, windowTimestamps, windowConfidences, windowDurations, _) =
+                    let (windowTokens, windowTimestamps, windowConfidences, windowDurations, metrics) =
                         try await Self.transcribeChunk(
                             samples: windowAudio,
                             contextSamples: 0,
@@ -1532,6 +1546,9 @@ struct ChunkProcessor {
                             language: language,
                             phraseBiasing: phraseBiasing
                         )
+                    if let metrics {
+                        phraseBiasingMetrics.append(metrics)
+                    }
 
                     guard windowTokens.count == windowTimestamps.count,
                         windowTokens.count == windowConfidences.count
@@ -1573,7 +1590,7 @@ struct ChunkProcessor {
             working.sort { $0.timestamp < $1.timestamp }
         }
 
-        return working
+        return (working, phraseBiasingMetrics)
     }
 
     /// Cumulative duration of speech-like audio (per-frame RMS above the
